@@ -13,12 +13,28 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// Fungsi Menghitung Jarak (Pergeseran) dalam Meter menggunakan Haversine Formula
+function hitungPergeseran(lat1, lon1, lat2, lon2) {
+  if (!lat1 || !lon1 || !lat2 || !lon2) return 0;
+  
+  const R = 6371000; // Jari-jari bumi dalam meter
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  
+  return Math.round((R * c) * 100) / 100; // Pembulatan 2 angka di belakang koma
+}
+
 // Route Utama
 app.get('/', (req, res) => {
   res.send('EWS Longsor Backend Active & Running!');
 });
 
-// 1. GET: Ambil Data Sensor untuk Dashboard Web
+// 1. GET: Ambil Data Sensor untuk Dashboard
 app.get('/api/data', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -40,12 +56,31 @@ app.get('/api/data', async (req, res) => {
 // 2. POST: Terima Data dari Sensor / IoT EWS Longsor
 app.post('/api/data', async (req, res) => {
   try {
-    const { kemiringan_tanah, kelembaban_tanah, status_bahaya, lokasi_alat } = req.body;
+    const { kemiringan_tanah, kelembaban_tanah, status_bahaya, latitude, longitude } = req.body;
+
+    const currentLat = parseFloat(latitude) || 0;
+    const currentLng = parseFloat(longitude) || 0;
+
+    // Ambil data pertama di database untuk dijadikan Acuan Titik Awal (Baseline Location)
+    let pergeseranMeter = 0;
+    const { data: firstLog } = await supabase
+      .from('DATA_LOGS')
+      .select('latitude, longitude')
+      .order('created_at', { ascending: true })
+      .limit(1);
+
+    if (firstLog && firstLog.length > 0) {
+      const latAwal = parseFloat(firstLog[0].latitude);
+      const lngAwal = parseFloat(firstLog[0].longitude);
+      pergeseranMeter = hitungPergeseran(latAwal, lngAwal, currentLat, currentLng);
+    }
 
     // Validasi 3 Level Status (AMAN, SIAGA, BAHAYA)
     const validStatus = ['AMAN', 'SIAGA', 'BAHAYA'];
-    const status = validStatus.includes(status_bahaya) ? status_bahaya : 'AMAN';
+    const statusUpper = (status_bahaya || 'AMAN').toUpperCase();
+    const status = validStatus.includes(statusUpper) ? statusUpper : 'AMAN';
 
+    // Insert ke Database
     const { data, error } = await supabase
       .from('DATA_LOGS')
       .insert([
@@ -53,7 +88,9 @@ app.post('/api/data', async (req, res) => {
           kemiringan_tanah: kemiringan_tanah || 0,
           kelembaban_tanah: kelembaban_tanah || 0,
           status_bahaya: status,
-          lokasi_alat: lokasi_alat || 'SKEWS'
+          latitude: currentLat,
+          longitude: currentLng,
+          pergeseran: pergeseranMeter
         }
       ])
       .select();
