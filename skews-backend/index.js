@@ -9,8 +9,8 @@ app.use(cors());
 app.use(express.json());
 
 // Inisialisasi Supabase Client
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
+const supabaseUrl = process.env.https://bismqrchaefutxitxgdq.supabase.co/rest/v1/;
+const supabaseKey = process.env.sb_publishable_6qYCICb1K2hg8UGy5c0Y2w_EIgeiu-E;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ==========================================
