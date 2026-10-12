@@ -1,7 +1,11 @@
 {
-  "functions": {
-    "api/sensor.js": {
-      "maxDuration": 30
-    }
+  "name": "skews-google-sheets-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "vercel dev"
+  },
+  "devDependencies": {
+    "vercel": "^41.6.2"
   }
 }
