@@ -1,206 +1,177 @@
-const express = require('express');
-const cors = require('cors');
-const { createClient } = require('@supabase/supabase-js');
+const crypto = require('node:crypto');
 
-const app = express();
+function sendJson(res, status, body) {
+  res.setHeader(
+    'Content-Type',
+    'application/json; charset=utf-8'
+  );
 
-// ==========================================
-// MIDDLEWARE
-// ==========================================
-app.use(cors());
-app.use(express.json());
-
-// ==========================================
-// SUPABASE CONFIGURATION
-// ==========================================
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-  console.error('SUPABASE_URL atau SUPABASE_KEY belum diatur di Environment Variables!');
+  return res.status(status).json(body);
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-// ==========================================
-// KALMAN FILTER GPS 1D CLASS
-// ==========================================
-class KalmanFilterGPS {
-  constructor(processNoise = 1e-5, measurementNoise = 1e-2) {
-    this.q = processNoise;
-    this.r = measurementNoise;
-    this.p = 1.0;
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') {
+    return false;
   }
 
-  update(measurement, lastState) {
-    let x = (lastState !== null && lastState !== undefined) ? lastState : measurement;
-    const pPrior = this.p + this.q;
-    const kalmanGain = pPrior / (pPrior + this.r);
-    x = x + kalmanGain * (measurement - x);
-    this.p = (1 - kalmanGain) * pPrior;
-    return x;
-  }
+  const aa = Buffer.from(a);
+  const bb = Buffer.from(b);
+
+  return (
+    aa.length === bb.length &&
+    crypto.timingSafeEqual(aa, bb)
+  );
 }
 
-// ==========================================
-// HAVERSINE FORMULA (Menghitung Pergeseran)
-// ==========================================
-function hitungPergeseran(lat1, lon1, lat2, lon2) {
+module.exports = async function handler(req, res) {
+  if (req.method === 'GET') {
+    return sendJson(res, 200, {
+      ok: true,
+      service: 'SKEWS Google Sheets API',
+      endpoint: '/api/sensor',
+      storage: 'Google Sheets only',
+      supabase: 'disabled'
+    });
+  }
+
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'GET, POST');
+
+    return sendJson(res, 405, {
+      ok: false,
+      error: 'Gunakan method POST'
+    });
+  }
+
+  const expectedApiKey = process.env.ESP32_API_KEY;
+  const suppliedApiKey = req.headers['x-api-key'];
+
+  if (!expectedApiKey) {
+    return sendJson(res, 500, {
+      ok: false,
+      error: 'ESP32_API_KEY belum diatur'
+    });
+  }
+
+  if (!safeEqual(suppliedApiKey, expectedApiKey)) {
+    return sendJson(res, 401, {
+      ok: false,
+      error: 'API key tidak valid'
+    });
+  }
+
+  const scriptUrl = process.env.GOOGLE_APPS_SCRIPT_URL;
+  const sheetsSecret = process.env.GOOGLE_SHEETS_SHARED_SECRET;
+
+  if (!scriptUrl || !sheetsSecret) {
+    return sendJson(res, 500, {
+      ok: false,
+      error: 'Environment Variables belum lengkap'
+    });
+  }
+
   if (
-    !Number.isFinite(lat1) ||
-    !Number.isFinite(lon1) ||
-    !Number.isFinite(lat2) ||
-    !Number.isFinite(lon2)
+    !/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec\/?$/
+      .test(scriptUrl)
   ) {
-    return 0;
+    return sendJson(res, 500, {
+      ok: false,
+      error: 'URL Apps Script harus berakhir dengan /exec'
+    });
   }
 
-  const R = 6371000; // Jari-jari bumi (meter)
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
+  let data = req.body;
 
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) *
-    Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) ** 2;
-
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-  return Math.round((R * c) * 100) / 100; // Pergeseran dalam meter
-}
-
-// ==========================================
-// ROUTE UTAMA
-// ==========================================
-app.get('/', (req, res) => {
-  res.send('EWS Longsor Backend Active & Running!');
-});
-
-// ==========================================
-// GET DATA SENSOR (Untuk Dashboard Frontend)
-// ==========================================
-app.get('/api/data', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('DATA_LOGS')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50);
-
-    if (error) {
-      return res.status(400).json({ error: error.message });
+  if (typeof data === 'string') {
+    try {
+      data = JSON.parse(data);
+    } catch (_) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: 'JSON tidak valid'
+      });
     }
-
-    res.status(200).json(data);
-  } catch (err) {
-    console.error('Get Data Error:', err);
-    res.status(500).json({ error: 'Terjadi kesalahan server internal' });
   }
-});
 
-// ==========================================
-// POST DATA DARI ESP32
-// ==========================================
-app.post('/api/data', async (req, res) => {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return sendJson(res, 400, {
+      ok: false,
+      error: 'Body harus berupa objek JSON'
+    });
+  }
+
+  if (
+    !data.device ||
+    !data.timestamp ||
+    Number.isNaN(new Date(data.timestamp).getTime())
+  ) {
+    return sendJson(res, 400, {
+      ok: false,
+      error: 'Device dan timestamp wajib valid'
+    });
+  }
+
+  const payload = {
+    ...data,
+    secret: sheetsSecret
+  };
+
   try {
-    const kemiringan = req.body.tilt ?? req.body.kemiringan_tanah ?? 0;
-    const kelembaban = req.body.soil ?? req.body.kelembaban_tanah ?? 0;
-    const statusRaw  = req.body.status ?? req.body.status_bahaya ?? 'AMAN';
-    const rawLat     = req.body.lat ?? req.body.latitude ?? 0;
-    const rawLng     = req.body.lng ?? req.body.longitude ?? 0;
+    const response = await fetch(scriptUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload),
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20000)
+    });
 
-    const currentRawLat = parseFloat(rawLat) || 0;
-    const currentRawLng = parseFloat(rawLng) || 0;
+    const responseText = await response.text();
 
-    // 1. Ambil data koordinat terakhir dari Supabase untuk Kalman Filter
-    const { data: lastLog } = await supabase
-      .from('DATA_LOGS')
-      .select('latitude, longitude')
-      .order('created_at', { ascending: false })
-      .limit(1);
+    let result;
 
-    const prevLat = (lastLog && lastLog.length > 0) ? parseFloat(lastLog[0].latitude) : null;
-    const prevLng = (lastLog && lastLog.length > 0) ? parseFloat(lastLog[0].longitude) : null;
-
-    // Process ke Kalman Filter
-    const kfLat = new KalmanFilterGPS(1e-5, 1e-2);
-    const kfLng = new KalmanFilterGPS(1e-5, 1e-2);
-
-    const filteredLat = kfLat.update(currentRawLat, prevLat);
-    const filteredLng = kfLng.update(currentRawLng, prevLng);
-
-    // 2. Hitung Pergeseran dari titik awal (Baseline Record)
-    let pergeseranMeter = 0;
-
-    const { data: firstLog } = await supabase
-      .from('DATA_LOGS')
-      .select('latitude, longitude')
-      .order('created_at', { ascending: true })
-      .limit(1);
-
-    if (firstLog && firstLog.length > 0) {
-      const latAwal = parseFloat(firstLog[0].latitude);
-      const lngAwal = parseFloat(firstLog[0].longitude);
-
-      pergeseranMeter = hitungPergeseran(
-        latAwal,
-        lngAwal,
-        filteredLat,
-        filteredLng
+    try {
+      result = JSON.parse(responseText);
+    } catch (_) {
+      console.error(
+        'Respons Apps Script bukan JSON:',
+        response.status,
+        responseText.slice(0, 300)
       );
+
+      return sendJson(res, 502, {
+        ok: false,
+        spreadsheet: false,
+        error: 'Respons Google Sheets tidak valid'
+      });
     }
 
-    // Deadband 5 cm (0.05 m)
-    if (pergeseranMeter < 0.05) {
-      pergeseranMeter = 0;
+    if (!response.ok || result.ok !== true) {
+      return sendJson(res, 502, {
+        ok: false,
+        spreadsheet: false,
+        error: result.error || 'Gagal menulis Google Sheets'
+      });
     }
 
-    // 3. Validasi Status
-    const validStatus = ['AMAN', 'SIAGA', 'BAHAYA'];
-    const statusUpper = statusRaw.toString().toUpperCase();
-    const status = validStatus.includes(statusUpper) ? statusUpper : 'AMAN';
-
-    // 4. Simpan Langsung Koordinat Kalman ke kolom latitude & longitude
-    const { data, error } = await supabase
-      .from('DATA_LOGS')
-      .insert([
-        {
-          kemiringan_tanah: parseFloat(kemiringan),
-          kelembaban_tanah: parseFloat(kelembaban),
-          status_bahaya: status,
-          latitude: filteredLat,    // <-- Langsung menyimpan hasil Kalman Filter
-          longitude: filteredLng,  // <-- Langsung menyimpan hasil Kalman Filter
-          pergeseran: pergeseranMeter
-        }
-      ])
-      .select();
-
-    if (error) {
-      console.error('Supabase Insert Error:', error);
-      return res.status(400).json({ error: error.message });
-    }
-
-    res.status(201).json({
-      success: true,
-      message: 'Data EWS berhasil disimpan',
-      data
+    return sendJson(res, 200, {
+      ok: true,
+      spreadsheet: true,
+      supabase: 'disabled',
+      device: String(data.device),
+      timestamp: new Date(data.timestamp).toISOString(),
+      reason: data.reason || 'periodic',
+      google_sheets: result
     });
 
   } catch (err) {
-    console.error('Post Data Error:', err);
-    res.status(500).json({ error: 'Terjadi kesalahan server internal' });
+    console.error('Google Sheets request gagal:', err);
+
+    return sendJson(res, 502, {
+      ok: false,
+      spreadsheet: false,
+      error: 'Gagal menghubungi Google Apps Script'
+    });
   }
-});
-
-// ==========================================
-// EXPORT & LOCAL DEVELOPMENT
-// ==========================================
-module.exports = app;
-
-const PORT = process.env.PORT || 3000;
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(PORT, () => {
-    console.log(`EWS Backend berjalan di port ${PORT}`);
-  });
-}
+};
